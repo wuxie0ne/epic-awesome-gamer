@@ -3,18 +3,30 @@
 # Author     : QIN2DIM
 # GitHub     : https://github.com/QIN2DIM
 # Description:
+from __future__ import annotations
+
 import asyncio
 import os
 import sys
 from dataclasses import dataclass, field
 from typing import List
 
-import hcaptcha_challenger as solver
+import importlib_metadata
+from hcaptcha_challenger import install
+from hcaptcha_challenger.agents import Malenia
 from loguru import logger
 from playwright.async_api import BrowserContext, async_playwright
 
-from services.agents.epic_games import EpicPlayer, EpicGames, Game, CompletedOrder
-from services.agents.epic_games import get_promotions, get_order_history
+from epic_games import (
+    EpicPlayer,
+    EpicGames,
+    Game,
+    CompletedOrder,
+    get_promotions,
+    get_order_history,
+)
+
+self_supervised = True
 
 
 @dataclass
@@ -37,7 +49,6 @@ class ISurrender:
 
     @classmethod
     def from_epic(cls):
-        logger.info("run", stage="Initialization EpicPlayer")
         return cls(player=EpicPlayer.from_account())
 
     @property
@@ -80,7 +91,7 @@ class ISurrender:
 
     async def claim_epic_games(self, context: BrowserContext):
         page = context.pages[0]
-        epic = EpicGames.from_player(self.player, page=page)
+        epic = EpicGames.from_player(self.player, page=page, self_supervised=self_supervised)
 
         if not self.ctx_cookies_is_available:
             logger.info("Try to flush cookie", task="claim_epic_games")
@@ -99,12 +110,31 @@ class ISurrender:
             )
             return
 
-        await epic.claim_weekly_games(page, self.promotions)
+        single_promotions = []
+        bundle_promotions = []
+        for p in self.promotions:
+            if "bundles" in p.url:
+                bundle_promotions.append(p)
+            else:
+                single_promotions.append(p)
+
+        if single_promotions:
+            await epic.claim_weekly_games(page, single_promotions)
+        if bundle_promotions:
+            await epic.claim_bundle_games(page, bundle_promotions)
 
     @logger.catch
     async def stash(self):
         if "linux" in sys.platform and "DISPLAY" not in os.environ:
             self.headless = True
+
+        logger.info(
+            "run",
+            image="20231121",
+            version=importlib_metadata.version("hcaptcha-challenger"),
+            role="EpicPlayer",
+            headless=self.headless,
+        )
 
         async with async_playwright() as p:
             context = await p.firefox.launch_persistent_context(
@@ -115,14 +145,16 @@ class ISurrender:
                 locale=self.locale,
                 args=["--hide-crash-restore-bubble"],
             )
+            await Malenia.apply_stealth(context)
             if not await self.prelude_with_context(context):
-                solver.install(upgrade=True)
+                install(upgrade=True, clip=True)
                 await self.claim_epic_games(context)
             await context.close()
 
 
 async def run():
     agent = ISurrender.from_epic()
+    agent.headless = False
     await agent.stash()
 
 
